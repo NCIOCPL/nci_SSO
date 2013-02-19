@@ -1,0 +1,374 @@
+<?php
+
+/**
+ * @file
+ * Provides protection using NIH SSO Login.
+ */
+
+/**
+ * This will be very basic for version 1.0.  We will setup a menu hook for logging in and out.  
+ * Logging in will automatically create the user account if it does not exist.
+ * 
+ * Pre-Requirements:
+ * 1. For anything other than Auto Login, the SSO configuration must protect /SSOLogin and use /SSOLogout as the logout
+ *    URL.  (SSO can be configured to have a special logout URL which will remove the SSO cookie.  The cookie will be
+ *    removed before the Drupal logout occurs
+ * 2. For auto login, everything should be protected. We will use the default Drupal /user/logout as the SSO logout.
+ * 
+ * How to test on Apache without SSO running (i.e. on your local machine)
+ * 1. Enable the header_module by ensuring the line is uncommented in the httpd.conf:
+ *     LoadModule headers_module modules/mod_headers.so
+ * 2. Restart Apache
+ * 3. Edit the .htaccess file in the root of the Drupal site
+ * 4. Add the following directive to the end of the .htaccess file
+      <IfModule mod_headers.c>
+         RequestHeader set SM_USER "your_username"
+      </IfModule>
+ * 
+ * That will add the SM_USER header to the request HTTP Headers mimicking what the SiteMinder agent will add
+ * to the headers.  You can add as many RequestHeader directives you need for other SSO headers.  (e.g. email)
+ * 
+ * TODO:
+ * 1. Show an access denied message if a user has been blocked.  The system will not login the user, but
+ *    it does not tell them anything either.  This would be an issue for item 6 as well.
+ * 
+ * 2. We need to figure out what to do with images and other items not protected by SSO.
+ * Test using conditions
+ *  AutoLogin
+ *  ONLY SSO
+ * 
+ * Doyles Comments:
+ * 1) I added the AUTHTYPE check in the init function. The reason for this is that the
+ * entire site should be protected by SSO... so even if the user did authenticate, they should
+ * still only be able to see pages where its protected. 
+ * **Note that this still allows pages that dont call index.php to be loaded like images.
+ * 
+ */
+
+/**
+ *Error Code 1 - Username Header is Empty 
+ */
+define('NCI_SSO_ERROR_EMPTY_USER_HEADER', 1);
+/**
+ *Error Code 2 - SM_USER header is missing 
+ */
+define('NCI_SSO_ERROR_MISSING_USER_HEADER', 2);
+/**
+ *Error Code 3 - SM_AUTHTYPE header is missing 
+ */
+define('NCI_SSO_ERROR_MISSING_AUTH_HEADER', 3);
+
+
+/**
+ * SSO Login Mode -- Only allow SSO
+ */
+define('NCI_SSO_MODE_ONLY_SSO', 1);
+
+/**
+ * SSO Login Mode -- Allow Mixed Mode
+ */
+define('NCI_SSO_MODE_MIXED', 2);
+
+/**
+ * SSO Login Mode -- Automatically login users
+ */
+define('NCI_SSO_MODE_AUTO_LOGIN', 3);
+
+function nci_SSO_login_mode() {
+    return variable_get('nci_sso_login_mode', NCI_SSO_MODE_ONLY_SSO);    
+}
+
+
+/**
+ * Taken and modified from core user.module
+ * Invokes a nci sso user hook in every module.
+ *
+ * We cannot use module_invoke() for this, because the arguments need to
+ * be passed by reference.
+ *
+ * @param $type
+ *   A text string that controls which user hook to invoke.  Valid choices are:
+ *   - insert: Invokes hook_user_insert().
+ * @param $edit
+ *   An associative array variable containing form values to be passed
+ *   as the first parameter of the hook function.
+ * @param $account
+ *   The user account object to be passed as the second parameter of the hook
+ *   function.
+ * @param $category
+ *   The category of user information being acted upon.
+ */
+function nci_sso_module_invoke($type, &$edit, $account, $category = NULL) {
+  foreach (module_implements('nci_sso_' . $type) as $module) {
+    $function = $module . '_nci_sso_' . $type;
+    $function($edit, $account, $category);
+  }
+}
+
+
+/**
+ * Implements hook_init().
+ *
+ * Traps a page load to see if authentication is required.
+ */
+function nci_SSO_init() {
+    
+    //If not auto login then exit immediately
+    if (nci_SSO_login_mode() != NCI_SSO_MODE_AUTO_LOGIN) {
+       return;
+    }
+    
+    
+    
+    global $user;
+    
+
+    
+    if($user && !user_is_anonymous()){
+        return;
+    }
+    
+    
+    
+    //We expect the site to be protected, but we didn't get what we expected and login failed.
+    //we want to display a 403 message to the user since the system was misconfigured.
+    if ($error = _nci_SSO_login() )
+    {
+        watchdog('error', 'SSO Login has failed. Please check the system configurations.');
+       drupal_add_http_header('Status', '403 Forbidden');
+       print 'SSO Error: Error occured logging in an account.';
+        drupal_exit();
+        
+    }
+    
+}
+/**
+ * Implements hook_menu().
+ */
+function nci_SSO_menu() {
+    $items = array();
+    
+    $items['admin/config/people/nci_sso'] = array(
+        'title' => t("NCI SSO Configuration"),
+        'type' => MENU_NORMAL_ITEM,
+        'page callback' => 'drupal_get_form',
+        'page arguments'=> array('nci_SSO_settings'),
+        'access arguments' => array('administer permissions')
+    );
+
+    //Auto login does not need these hooks
+    if (nci_SSO_login_mode() != NCI_SSO_MODE_AUTO_LOGIN) {
+        $items['SSOLogin'] = array(
+            'page callback' => 'nci_SSO_menu_login',
+            'access callback' => TRUE,
+            'type' => MENU_CALLBACK,
+        );
+
+    }
+    
+    return $items;
+}
+
+/**
+ * Implements hook_menu_alter().
+ */
+function nci_SSO_menu_alter(&$items) {
+    //Mixed mode needs login pages etc...  So remove them if SSO only or auto login
+    if (nci_SSO_login_mode() != NCI_SSO_MODE_MIXED) {
+        $items['user']['access callback'] = 'user_is_logged_in'; //only hide the /user page if it is an anonymous user.
+        $items['user/login']['access callback'] = FALSE; //Hide Login
+        $items['user/register']['access callback'] = FALSE; //Hide Registration
+        $items['user/password']['access callback'] = FALSE; //Hide request password page
+        $items['user/reset/%/%/%']['access callback'] = FALSE; //Hide reset password page
+       
+    }
+}
+
+/**
+ * Implements hook_block_view_MODULE_DELTA_alter().
+ * 
+ * Hide the user login block
+ */
+function nci_SSO_block_view_user_login_alter(&$data, $block) {
+    if (nci_SSO_login_mode() != NCI_SSO_MODE_MIXED) {
+        $data = array();
+    } //else add nice login using NIH SSO
+}
+
+
+/**
+  * Implements hook_form_alter().
+  *
+  * Hides the password fields for SSO authenticated users.
+  */
+function nci_SSO_form_alter(&$form, $form_state, $form_id) {    
+    switch($form_id) {
+        case 'user_profile_form' :
+            global $user;
+
+            $authmaps = user_get_authmaps($user->name);
+            if (isset($authmaps["nci_SSO_authentication"])) {
+                unset($form['account']['pass']);
+                unset($form['account']['pass_required_values']);
+                unset($form['account']['current_pass']); 
+                unset($form['account']['current_pass_required_values']);
+                $form['#validate'] = array_diff($form['#validate'], array('user_validate_pass', 'user_validate_current_pass'));
+            }
+            break;
+    }
+}
+
+/**
+ * Callback for the module configuration item
+ * 
+ * The module will configure an authentication type option:
+ * SSO Only Logins (Default) - This will only allow SSO logins for the site. When enabled, all user login things - menu_hooks, blocks, etc... are hidden
+ * Mixed Logins - allow forms to be used with SSO module.  SSO users in theory cannot login using the normal forms login,
+ *  but by using the special /SSOLogin url.  Theoretically, this would be a button or something on the user login forms.
+ * Auto Login - Determines if SSO is protecting the entire site instead of one URL (Default: no)
+ *   - When set to yes, the system will behave like SSO Only Logins, except users will automatically be authenticated.
+ *   NOTE: this also means the ENTIRE site must be protected by SSO.
+ */
+function nci_SSO_settings($form, &$form_state) {
+    $form['nci_sso_login_mode'] = array(
+        '#type' => 'radios',
+        '#title' => t('Site Authentication Type'),
+        '#default_value' => nci_SSO_login_mode(),
+        '#options' => array(
+            NCI_SSO_MODE_ONLY_SSO => t('Only Allow SSO Logins'),
+            NCI_SSO_MODE_MIXED => t('Mixed Authentication'),
+            NCI_SSO_MODE_AUTO_LOGIN => t('Auto Login Using SSO'),
+        ),
+        '#description' => t('Community Portals should be "Mixed Authentication", Non-user based sites "Mixed Authentication", and sites completely protected by SSO should be "Auto Login".')        
+    );
+    
+    return system_settings_form($form);
+}
+
+
+/**
+ * Menu callback for logging in through SSO.
+    
+ */
+function nci_SSO_menu_login(){
+    
+    //call the login function.
+    
+   if($error = _nci_SSO_login())
+   {
+       switch($error){
+           case NCI_SSO_ERROR_EMPTY_USER_HEADER:
+           case NCI_SSO_ERROR_MISSING_USER_HEADER:
+           case NCI_SSO_ERROR_MISSING_AUTH_HEADER:
+                drupal_add_http_header('Status', '403 Forbidden');
+                drupal_set_title('SSO Login Failed');
+                return t('The site was unable to log the user in. Error Code: ' . $error);
+           break;
+           
+       }
+   }
+   
+   else {
+        //Let's redirect to the homepage for now.  Maybe have a post_login hook that determines what
+        //to do after a successful login?
+        //The trick is for normal sites where admin is protected by SSO, it makes sense to login the user and
+        //then take them to the homepage or something.
+        //For a site completely proected by SSO, it would be nice to return to the page they requested.
+
+       drupal_goto();
+   }
+   
+   
+    
+}
+
+
+/**
+ * This is the function which actually does the login. Returns a true value if there is an
+ * error processing the login. This is handled in the nci_SSO_init() or  the nci_SSO_menu_login() function.
+ */
+function _nci_SSO_login() {
+    //HTTP_SM_AUTHTYPE should be set to "Form" if it is protected. (This is what we have
+    //observed for the current Drupal SSO Setup)
+    if( !isset($_SERVER['HTTP_SM_AUTHTYPE']) || $_SERVER['HTTP_SM_AUTHTYPE'] != 'Form'){
+        watchdog('SSO Login Failed', 'Page is not protected by SSO.', NULL, WATCHDOG_WARNING);
+        return NCI_SSO_ERROR_MISSING_AUTH_HEADER;
+    }
+    //Step 1. Get the SM_USER HTTP header
+    if (isset($_SERVER['HTTP_SM_USER'])) {
+        $username = $_SERVER['HTTP_SM_USER'];
+    
+        if ($username) {
+             
+            $_REQUEST['SSOLogin'] = TRUE;
+            
+            
+            user_external_login_register( $username, 'nci_SSO_authentication');
+            
+           
+            
+            return 0;
+            
+            
+        } else {
+            watchdog('SSO Login Failed', 'Username was empty in headers', NULL, WATCHDOG_WARNING);
+
+            return NCI_SSO_ERROR_EMPTY_USER_HEADER;
+        }
+    } else {
+            watchdog('SSO Login Failed', 'Username was missing from headers', NULL, WATCHDOG_WARNING);
+            
+            return NCI_SSO_ERROR_MISSING_USER_HEADER;        
+    }
+    
+}
+
+/**
+ * Hooks into user_presave to add the email address to a user account when
+ * logging in through SSO. 
+ * 
+ * registers hook_nci_SSO_insert_presave() to allow external modules to add user 
+ * profile fields to new user generation by SSO.
+ * 
+ * 
+ * $edit: The array of form values submitted by the user.
+ * $account: The user object on which the operation is being performed.
+ * $category: The active category of user information being edited.
+ * @param type $edit
+ * @param type $account
+ * @param type $category 
+ */
+function nci_SSO_user_presave(&$edit, $account, $category){
+
+    if( isset($_REQUEST['SSOLogin']) ) //if the session is set...
+    {
+       if(isset($_SERVER['HTTP_USER_EMAIL'])) //if the USER_EMAIL header is set...
+       {
+            $email = $_SERVER['HTTP_USER_EMAIL'];
+
+            if($email) //If the email is valid (We could expend this to check for empty spaces..
+            {
+                $edit['mail'] = $email;
+                //load all other modules implementations of nci_SSO_user_presave.
+                nci_SSO_module_invoke('insert_presave', $edit, $account, $category);
+            }
+            else {
+                    watchdog('Failed to set user email on sso user presave', 'Email was missing.', NULL, WATCHDOG_WARNING);
+
+            }
+       }
+       else {
+           watchdog('Failed to set user email on sso user presave', 'HTTP_USER_EMAIL Header was missing.', NULL, WATCHDOG_WARNING);
+
+       }
+    }
+  
+
+    
+}
+
+
+
+
+
+?>
