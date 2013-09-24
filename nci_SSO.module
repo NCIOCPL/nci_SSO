@@ -58,6 +58,15 @@ define('NCI_SSO_ERROR_MISSING_USER_HEADER', 2);
  */
 define('NCI_SSO_ERROR_MISSING_AUTH_HEADER', 3);
 
+/**
+ *Error Code 4 - Could not save user account 
+ */
+define('NCI_SSO_ERROR_UNABLE_TO_SAVE_USER', 4);
+
+/**
+ *Error Code 5 - Unknown user 
+ */
+define('NCI_SSO_ERROR_UNKNOWN_USER', 5);
 
 /**
  * SSO Login Mode -- Only allow SSO
@@ -77,6 +86,11 @@ define('NCI_SSO_MODE_AUTO_LOGIN', 3);
 function nci_SSO_login_mode() {
     return variable_get('nci_sso_login_mode', NCI_SSO_MODE_ONLY_SSO);    
 }
+
+function nci_SSO_autocreate() {
+    return variable_get('nci_sso_autocreate', TRUE);    
+}
+
 
 
 /**
@@ -118,17 +132,11 @@ function nci_SSO_init() {
        return;
     }
     
-    
-    
     global $user;
-    
-
     
     if($user && !user_is_anonymous()){
         return;
     }
-    
-    
     
     //We expect the site to be protected, but we didn't get what we expected and login failed.
     //we want to display a 403 message to the user since the system was misconfigured.
@@ -137,11 +145,11 @@ function nci_SSO_init() {
         watchdog('error', 'SSO Login has failed. Please check the system configurations.');
        drupal_add_http_header('Status', '403 Forbidden');
        print 'SSO Error: Error occured logging in an account.';
-        drupal_exit();
-        
-    }
-    
+        drupal_exit();    
+    }    
 }
+
+
 /**
  * Implements hook_menu().
  */
@@ -154,6 +162,14 @@ function nci_SSO_menu() {
         'page callback' => 'drupal_get_form',
         'page arguments'=> array('nci_SSO_settings'),
         'access arguments' => array('administer permissions')
+    );
+    
+    //Allow users to create SSO users even if we automatically create them
+    $items['admin/people/create_sso'] = array(
+        'title' => 'Add NIH SSO user',
+        'page arguments' => array('create'),
+        'access arguments' => array('administer users'),
+        'type' => MENU_LOCAL_ACTION,
     );
 
     //Auto login does not need these hooks
@@ -204,19 +220,82 @@ function nci_SSO_block_view_user_login_alter(&$data, $block) {
 function nci_SSO_form_alter(&$form, $form_state, $form_id) {    
     switch($form_id) {
         case 'user_profile_form' :
+        case 'user_register_form' :
+            //This is the user that is editing the profile -- which
+            //may be a different user's profile
             global $user;
+            
+            $sso_username = FALSE;   
+            
+            if ($form_id == 'user_register_form' && current_path() != 'admin/people/create_sso') {
+                //This is the normal user add form.
+                return;
+            } else if ($form_id == 'user_profile_form') {
+                   //Check the authmap to see if this user uses eDir authentication
+                   $sso_username_db = db_query("SELECT authname FROM authmap WHERE uid = :uid AND module = :module", array(':uid' => $form_state['user']->uid, ':module' => 'nci_SSO_authentication'))->fetchObject();
 
-            $authmaps = user_get_authmaps($user->name);
-            if (isset($authmaps["nci_SSO_authentication"])) {
-                unset($form['account']['pass']);
-                unset($form['account']['pass_required_values']);
-                unset($form['account']['current_pass']); 
-                unset($form['account']['current_pass_required_values']);
-                $form['#validate'] = array_diff($form['#validate'], array('user_validate_pass', 'user_validate_current_pass'));
+                   //No DN - abort
+                   if (!$sso_username_db) {
+                       return;
+                   } else {
+                       $sso_username = $sso_username_db->authname;
+                   }
             }
+
+            unset($form['account']['pass']);
+            unset($form['account']['pass_required_values']);
+            unset($form['account']['current_pass']); 
+            unset($form['account']['current_pass_required_values']);
+            $form['#validate'] = array_diff($form['#validate'], array('user_validate_pass', 'user_validate_current_pass'));
+            
+            if (user_access('administer users')) {
+                //Can administer users so show edit field
+                $form['account']['user_sso_username'] = array(
+                    '#type' => 'textfield',
+                    '#title' => t('User NIH SSO Username'),
+                    '#maxlength' => 128,
+                    '#description' => t('The users NIH SSO Username.  You can find this information by going to https://ned.nih.gov and search for the user and viewing their details.  On the details page this is the "NIH Login Username" field.  Try to make the Drupal username match this value if possible.'),
+                    '#required' => TRUE,
+                    '#default_value' => ($sso_username ? $sso_username : ''),
+                );
+            } else {
+                //Cannot administer users - or is the user who is not an admin
+                //so just show label.
+                $form['account']['user_sso_username'] = array(
+                '#type' => 'item',
+                '#title' => t('User NIH SSO Username'),
+                '#markup' => $sso_username,
+                );
+
+            }
+
+            //Add our submit handlers before and after the default.
+            // The first is to zero out the password so there are no
+            //    errors
+            // The second is to setup the authmap
+            $form['#submit'] = array_merge(
+                    array('nci_SSO_pass_submit_handler'),
+                    $form['#submit'],
+                    array('nci_SSO_authmap_submit_handler')
+            );            
             break;
     }
 }
+
+function nci_SSO_pass_submit_handler(&$form, &$form_state) {
+    //Add the user with an empty password - Drupal will not
+    //allow users to authenticate using Drupal auth if 
+    //there is no crypt - so if eDir gets turned off, then
+    //the user cannot get in.  This is good.
+    $form_state['values']['pass'] = FALSE;
+}
+
+function nci_SSO_authmap_submit_handler(&$form, &$form_state) {
+    if (isset($form_state['values']['user_sso_username'])) {
+        user_set_authmaps($form_state['user'], array("authenticate_nci_SSO_authentication" => $form_state['values']['user_sso_username']));
+    }
+}
+
 
 /**
  * Callback for the module configuration item
@@ -242,13 +321,19 @@ function nci_SSO_settings($form, &$form_state) {
         '#description' => t('Community Portals should be "Mixed Authentication", Non-user based sites "Mixed Authentication", and sites completely protected by SSO should be "Auto Login".')        
     );
     
+    $form['nci_sso_autocreate'] = array(
+        '#type' => 'checkbox',
+        '#title' => t('Automatically Create Logins'),
+        '#default_value' => nci_SSO_autocreate(),
+        '#description' => t('Automatically create user accounts on successful SSO authentication.')
+    );
+       
     return system_settings_form($form);
 }
 
 
 /**
  * Menu callback for logging in through SSO.
-    
  */
 function nci_SSO_menu_login(){
     
@@ -260,9 +345,16 @@ function nci_SSO_menu_login(){
            case NCI_SSO_ERROR_EMPTY_USER_HEADER:
            case NCI_SSO_ERROR_MISSING_USER_HEADER:
            case NCI_SSO_ERROR_MISSING_AUTH_HEADER:
+           case NCI_SSO_ERROR_UNABLE_TO_SAVE_USER:
                 drupal_add_http_header('Status', '403 Forbidden');
                 drupal_set_title('SSO Login Failed');
                 return t('The site was unable to log the user in. Error Code: ' . $error);
+           break;
+       
+           case NCI_SSO_ERROR_UNKNOWN_USER:
+                drupal_add_http_header('Status', '403 Forbidden');
+                drupal_set_title('Login Failed');
+                return t('Unauthorized or Unknown User');
            break;
            
        }
@@ -277,9 +369,6 @@ function nci_SSO_menu_login(){
 
        drupal_goto();
    }
-   
-   
-    
 }
 
 
@@ -302,14 +391,41 @@ function _nci_SSO_login() {
              
             $_REQUEST['SSOLogin'] = TRUE;
             
-            
-            user_external_login_register( $username, 'nci_SSO_authentication');
-            
-           
-            
+            //Change in v1.1: Check to see if the user has an account first
+            //                Then check to see if we automatically create 
+            //                accounts
+            // NOTE, this is a copy of user_external_login_register
+            // since we want to NOT autocreate if that setting is disabled.
+            $account = user_external_load($username);
+            if (!$account) {
+                if (nci_SSO_autocreate()) {
+                    // Register this new user.
+                    $userinfo = array(
+                      'name' => $username,
+                      'pass' => FALSE, //Zero out pass to prevent form logins
+                      'init' => $username,
+                      'status' => 1,
+                      'access' => REQUEST_TIME
+                    );
+                    $account = user_save(drupal_anonymous_user(), $userinfo);
+                    // Terminate if an error occurred during user_save().
+                    if (!$account) {
+                      watchdog('SSO Login Failed', 'Unable to save user', NULL, WATCHDOG_WARNING);
+                      return NCI_SSO_ERROR_UNABLE_TO_SAVE_USER;
+                    }
+                    user_set_authmaps($account, array("authenticate_nci_SSO_authentication" => $username));
+                } else {
+                    //Unknown user account and not autocreating
+                    return NCI_SSO_ERROR_UNKNOWN_USER;
+                }
+            }
+
+            // Log user in.
+            $form_state['uid'] = $account->uid;
+            user_login_submit(array(), $form_state);
+                        
             return 0;
-            
-            
+                        
         } else {
             watchdog('SSO Login Failed', 'Username was empty in headers', NULL, WATCHDOG_WARNING);
 
