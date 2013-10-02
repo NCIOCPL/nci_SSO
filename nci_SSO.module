@@ -69,6 +69,11 @@ define('NCI_SSO_ERROR_UNABLE_TO_SAVE_USER', 4);
 define('NCI_SSO_ERROR_UNKNOWN_USER', 5);
 
 /**
+ * Error Code 6 - User Blocked
+ */
+define('NCI_SSO_ERROR_USER_BLOCKED', 6);
+
+/**
  * SSO Login Mode -- Only allow SSO
  */
 define('NCI_SSO_MODE_ONLY_SSO', 1);
@@ -127,6 +132,9 @@ function nci_sso_module_invoke($type, &$edit, $account, $category = NULL) {
  */
 function nci_SSO_init() {
     
+    $path = request_path();
+    $alias = drupal_get_path_alias($path);
+    
     //If not auto login then exit immediately
 	//or if called from command line (e.g. drush) then exit immediately
     if (
@@ -144,12 +152,13 @@ function nci_SSO_init() {
     
     //We expect the site to be protected, but we didn't get what we expected and login failed.
     //we want to display a 403 message to the user since the system was misconfigured.
-    if ($error = _nci_SSO_login() )
+    if (strtolower($alias) != "ssologin")
     {
-        watchdog('error', 'SSO Login has failed. Please check the system configurations.');
-       drupal_add_http_header('Status', '403 Forbidden');
-       print 'SSO Error: Error occured logging in an account.';
-        drupal_exit();    
+        $options = array();
+        $options['query'] = array();
+        $options['query']['ref'] = $alias;
+        
+        drupal_goto('SSOLogin', $options);
     }    
 }
 
@@ -175,16 +184,13 @@ function nci_SSO_menu() {
         'type' => MENU_LOCAL_ACTION,
     );
 
-    //Auto login does not need these hooks
-    if (nci_SSO_login_mode() != NCI_SSO_MODE_AUTO_LOGIN) {
-        $items['SSOLogin'] = array(
-            'page callback' => 'nci_SSO_menu_login',
-            'access callback' => TRUE,
-            'type' => MENU_CALLBACK,
-        );
+    // all login modes need this page - even auto-login redirects here
+    $items['SSOLogin'] = array(
+        'page callback' => 'nci_SSO_menu_login',
+        'access callback' => TRUE,
+        'type' => MENU_CALLBACK,
+    );
 
-    }
-    
     return $items;
 }
 
@@ -355,6 +361,7 @@ function nci_SSO_menu_login(){
            break;
        
            case NCI_SSO_ERROR_UNKNOWN_USER:
+           case NCI_SSO_ERROR_USER_BLOCKED:
                 drupal_add_http_header('Status', '403 Forbidden');
                 drupal_set_title('Login Failed');
                 return t('Unauthorized or Unknown User');
@@ -370,7 +377,18 @@ function nci_SSO_menu_login(){
         //then take them to the homepage or something.
         //For a site completely proected by SSO, it would be nice to return to the page they requested.
 
-       drupal_goto();
+       // check for the existence of a referring page
+       $query = drupal_get_query_parameters();
+       
+       if(isset($query['ref']) && drupal_valid_path($query['ref'])) {
+           // lookup alias for referring path
+           $alias = drupal_get_path_alias($query['ref']);
+           drupal_goto($alias);
+       }
+       else
+       {
+           drupal_goto();
+       }
    }
 }
 
@@ -421,6 +439,10 @@ function _nci_SSO_login() {
                     //Unknown user account and not autocreating
                     return NCI_SSO_ERROR_UNKNOWN_USER;
                 }
+            }
+            else if($account->status == 0) {
+                // user is blocked and can't be logged in
+                return NCI_SSO_ERROR_USER_BLOCKED;
             }
 
             // Log user in.
