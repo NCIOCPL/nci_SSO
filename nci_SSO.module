@@ -310,7 +310,8 @@ function nci_sso_convert_form_submit($form, &$form_state) {
 function _nci_sso_switchable($uid) {
     if (!user_access('administer users'))
         return false;
-    return empty(_nci_sso_load_authname($uid)) ? true : false;
+    $authname = _nci_sso_load_authname($uid);
+    return empty($authname) ? true : false;
 }
 
 /**
