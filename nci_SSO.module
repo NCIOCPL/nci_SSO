@@ -545,13 +545,13 @@ function nci_SSO_menu_login(){
 function _nci_SSO_login() {
     //HTTP_SM_AUTHTYPE should be set to "Form" if it is protected. (This is what we have
     //observed for the current Drupal SSO Setup)
-    if( !isset($_SERVER['HTTP_SM_AUTHTYPE']) || $_SERVER['HTTP_SM_AUTHTYPE'] != 'Form'){
+    if( _nci_SSO_get_header_by_name('authtype') != 'Form'){
         watchdog('SSO Login Failed', 'Page is not protected by SSO.', NULL, WATCHDOG_WARNING);
         return NCI_SSO_ERROR_MISSING_AUTH_HEADER;
     }
     //Step 1. Get the SM_USER HTTP header
-    if (isset($_SERVER['HTTP_SM_USER'])) {
-        $username = $_SERVER['HTTP_SM_USER'];
+    $username = _nci_SSO_get_header_by_name('user');
+    if (isset($username)) {
 
         if ($username) {
 
@@ -611,9 +611,30 @@ function _nci_SSO_login() {
 
 function _nci_SSO_get_SM_Header_Name($variable) {
 	switch($variable) {
-		case 'email' : return variable_get('nci_SSO_header_email', 'USER_EMAIL');
-	
-	}
+        case 'email': 
+            return variable_get('nci_SSO_header_email', 'USER_EMAIL');
+        case 'authtype': 
+            return variable_get('nci_SSO_header_authtype', 'SM_AUTHTYPE');
+        case 'user': 
+            return variable_get('nci_SSO_header_user', 'SM_USER');
+        default:
+            return null;
+    }
+}
+
+function _nci_SSO_get_header_by_name($name) {
+    
+    // retrieve the header name
+    
+    // if the header name exists,
+    // then get the header's value
+    
+    $header = _nci_SSO_get_SM_Header_Name($name);
+    if($header) {
+        return _nci_SSO_get_header($header);
+    }
+    
+    return null;
 }
 
 /**
@@ -632,17 +653,23 @@ function _nci_SSO_get_header($header) {
 	// If $_SERVER then the header looks like
 	//  HTTP_SM_USER
 	
-	if (function_exists('apache_request_headers')) {
-		return apache_request_headers()[$header];
+	if (_nci_SSO_has_apache_headers()) {
+        $headers = apache_request_headers();
+        if(isset($headers[$header])) {
+            return $headers[$header];
+        }
 	} else {
 		return $_SERVER['HTTP_' . $header];
 	}
+    
+    return null;
 }
 
 function _nci_SSO_has_apache_headers() {
+    static $isApache = NULL;
 
 	if (!isset($isApache)) {
-		static $isApache = ;
+		 $isApache = function_exists('apache_request_headers');
 	}
 		
 	return $isApache;
@@ -668,24 +695,22 @@ function nci_SSO_user_presave(&$edit, $account, $category){
 
     if( isset($_REQUEST['SSOLogin']) ) //if the session is set...
     {
-       if(isset($_SERVER['HTTP_USER_EMAIL'])) //if the USER_EMAIL header is set...
-       {
-            $email = $_SERVER['HTTP_USER_EMAIL'];
-
-            if($email) //If the email is valid (We could expend this to check for empty spaces..
-            {
-                $edit['mail'] = $email;
-                //load all other modules implementations of nci_SSO_user_presave.
-                nci_SSO_module_invoke('insert_presave', $edit, $account, $category);
-            }
-            else {
-                    watchdog('Failed to set user email on sso user presave', 'Email was missing.', NULL, WATCHDOG_WARNING);
-
-            }
-       }
-       else {
-           watchdog('Failed to set user email on sso user presave', 'HTTP_USER_EMAIL Header was missing.', NULL, WATCHDOG_WARNING);
-
-       }
+        $email = _nci_SSO_get_header_by_name('email');
+        if(!isset($email)) //if the USER_EMAIL header is set...
+        {
+            watchdog('Failed to set user email on sso user presave', 
+                'HTTP_USER_EMAIL Header was missing.', NULL, WATCHDOG_WARNING);
+        }
+        else if($email) //If the email is valid (We could expend this to check for empty spaces..
+        {
+            $edit['mail'] = $email;
+            //load all other modules implementations of nci_SSO_user_presave.
+            nci_SSO_module_invoke('insert_presave', $edit, $account, $category);
+        }
+        else {
+            watchdog('Failed to set user email on sso user presave', 
+                'Email was missing.', NULL, WATCHDOG_WARNING);
+        }
+       
     }
 }
