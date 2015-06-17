@@ -23,6 +23,7 @@
  * 4. Add the following directive to the end of the .htaccess file
       <IfModule mod_headers.c>
          RequestHeader set SM_USER "your_username"
+		 RequestHeader set SM_AUTHTYPE "Form"
       </IfModule>
  *
  * That will add the SM_USER header to the request HTTP Headers mimicking what the SiteMinder agent will add
@@ -42,6 +43,13 @@
  * entire site should be protected by SSO... so even if the user did authenticate, they should
  * still only be able to see pages where its protected.
  * **Note that this still allows pages that dont call index.php to be loaded like images.
+ *
+ * Change Log
+ * -----------
+ *
+ * 1.3 - Adding support for SiteMinder module + Apache 2.4.  Apache changed the way it handles HTTP Headers
+ * and the population of environmental variable (e.g. $_SERVER) 
+ *
  *
  */
 
@@ -598,6 +606,46 @@ function _nci_SSO_login() {
 
             return NCI_SSO_ERROR_MISSING_USER_HEADER;
     }
+
+}
+
+function _nci_SSO_get_SM_Header_Name($variable) {
+	switch($variable) {
+		case 'email' : return variable_get('nci_SSO_header_email', 'USER_EMAIL');
+	
+	}
+}
+
+/**
+ * Helper function to get the value of a header.  Changes in Apache 2.4 do not push SiteMinder variables
+ * into the environmental $_SERVER variable anymore.  There is an apache_request_headers() function that can
+ * can access the header, but is only available to certain web servers.  In order to make sure this stays
+ * compatible with IIS, we are creating this wrapper function as a generic way to access the headers.
+ * 
+ * $header: The header to get the value of.  This should not contain the preceeding HTTP_ string.
+ * @param type $header
+ */
+function _nci_SSO_get_header($header) {
+
+	// If apache header than the format looks like
+	// 	SM_USER
+	// If $_SERVER then the header looks like
+	//  HTTP_SM_USER
+	
+	if (function_exists('apache_request_headers')) {
+		return apache_request_headers()[$header];
+	} else {
+		return $_SERVER['HTTP_' . $header];
+	}
+}
+
+function _nci_SSO_has_apache_headers() {
+
+	if (!isset($isApache)) {
+		static $isApache = ;
+	}
+		
+	return $isApache;
 
 }
 
