@@ -618,6 +618,9 @@ function _nci_SSO_get_SM_Header_Name($variable) {
         case 'user': 
             return variable_get('nci_SSO_header_user', 'SM_USER');
         default:
+            watchdog('nci_SSO', 
+                "_nci_SSO_get_SM_Header_Name: unknown variable alias $variable requested.",
+                NULL, WATCHDOG_WARNING);
             return null;
     }
 }
@@ -657,9 +660,20 @@ function _nci_SSO_get_header($header) {
         $headers = apache_request_headers();
         if(isset($headers[$header])) {
             return $headers[$header];
+        } else {
+            watchdog('nci_SSO', 
+                "_nci_SSO_get_header: $header not found in Apache headers.",
+                NULL, WATCHDOG_WARNING);
         }
 	} else {
-		return $_SERVER['HTTP_' . $header];
+        $http_header = 'HTTP_' . $header;
+        if(isset($_SERVER[$http_header])) {
+            return $_SERVER[$http_header];
+        } else {
+            watchdog('nci_SSO', 
+                "_nci_SSO_get_header: $http_header not found in server headers.",
+                NULL, WATCHDOG_WARNING);
+        }
 	}
     
     return null;
