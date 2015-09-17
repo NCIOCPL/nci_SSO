@@ -664,6 +664,13 @@ function _nci_SSO_get_header($header) {
             watchdog('nci_SSO', 
                 "_nci_SSO_get_header: $header not found in Apache headers.",
                 NULL, WATCHDOG_WARNING);
+			
+			if(function_exists(apache_request_headers)) {
+				$apacheHeaders = print_r(apache_request_headers(), true);
+				watchdog('nci_SSO', 
+                "_nci_SSO_get_SM_Header_Name: apache headers:\n%apacheHeaders",
+                array('%apacheHeaders' => $apacheHeaders), WATCHDOG_WARNING);
+			}
         }
 	} else {
         $http_header = 'HTTP_' . $header;
@@ -673,6 +680,11 @@ function _nci_SSO_get_header($header) {
             watchdog('nci_SSO', 
                 "_nci_SSO_get_header: $http_header not found in server headers.",
                 NULL, WATCHDOG_WARNING);
+			
+			$serverHeaders = print_r($_SERVER), true);
+				watchdog('nci_SSO', 
+                "_nci_SSO_get_SM_Header_Name: _SERVER headers:\n%server",
+                array('%server' => $serverHeaders), WATCHDOG_WARNING);
         }
 	}
     
