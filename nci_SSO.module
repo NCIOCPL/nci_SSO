@@ -681,7 +681,7 @@ function _nci_SSO_get_header($header) {
                 "_nci_SSO_get_header: $http_header not found in server headers.",
                 NULL, WATCHDOG_WARNING);
 			
-			$serverHeaders = print_r($_SERVER), true);
+			$serverHeaders = print_r($_SERVER, true);
 				watchdog('nci_SSO', 
                 "_nci_SSO_get_SM_Header_Name: _SERVER headers:\n%server",
                 array('%server' => $serverHeaders), WATCHDOG_WARNING);
