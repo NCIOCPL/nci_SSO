@@ -665,7 +665,7 @@ function _nci_SSO_get_header($header) {
                 "_nci_SSO_get_header: $header not found in Apache headers.",
                 NULL, WATCHDOG_WARNING);
 			
-			if(function_exists(apache_request_headers)) {
+			if(function_exists('apache_request_headers')) {
 				$apacheHeaders = print_r(apache_request_headers(), true);
 				watchdog('nci_SSO', 
                 "_nci_SSO_get_SM_Header_Name: apache headers:\n%apacheHeaders",
