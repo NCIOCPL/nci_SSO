@@ -1,6 +1,7 @@
 <?php
 
 /**
+ * $Id$
  * @file
  * Provides protection using NIH SSO Login.
  */
@@ -101,14 +102,163 @@ define('NCI_SSO_MODE_MIXED', 2);
  */
 define('NCI_SSO_MODE_AUTO_LOGIN', 3);
 
+/**
+ * If an OpenID is used, there is a string identifying the
+ * type of ID, then a separator ':', then the id itself.
+ *
+ * The separator chosen here appears to be invalid in NIH names
+ * and in all email addresses.  See RFC 2822.
+ */
+define('NCI_SSO_OPENID_KEYSEP', ':');
+
+/**
+ * Descriptive prompt for user name or identification
+ */
+define('NCI_SSO_IDPROMPT',
+    'The user\'s NIH SSO Username.  You can find this information ' .
+    'by going to https://ned.nih.gov and searching for the user and ' .
+    'viewing the account\'s details.  On the details page this is ' .
+    'the "NIH Login Username" field.  Try to make the Drupal ' .
+    'username match this value if possible.');
+
+/**
+ * Same as above, but with the addition of OpenID identification
+ */
+define('NCI_SSO_OPENID_PROMPT',
+    'Alternatively, enter the user\'s OpenID identifier.  This ' .
+    'identifier must be provided by the user.  Google identifiers ' .
+    'are Google account email addresses (which may or may not be ' .
+    'gmail addresses.)  If the identifier is an email address, ' .
+    'prefix it with "mail:", e.g., "mail:jjsmith@gmail.com".');
+
+/**
+ * Array of allowable prefixes.
+ *
+ * Here is our table of prefixes.  Add to it if we ever need more.
+ * Key must always be lower case.
+ * Values must match what can be recognized in
+ *        _nci_SSO_get_header_by_name().
+ * If new headers are needed, modify that function.
+ *   key   = prefix on ID.
+ *   value = header to examine for NIH return.
+ *
+ *  @return array of prefixes
+ */
+function _nci_sso_get_openid_prefixes() {
+    return array(
+        'mail' => 'email',
+    );
+}
+
+/**
+ * Get the prompt appropriate for NIH only or NIH + OpenID
+ */
+function _nci_sso_get_idprompt_desc() {
+    if (!nci_SSO_openid_okay()) {
+        return NCI_SSO_IDPROMPT;
+    }
+
+    // Open ID allowed, return complex prompt
+    return NCI_SSO_IDPROMPT . "<br /><br />" . NCI_SSO_OPENID_PROMPT;
+}
+
+/**
+ * What login mode is configured for the website?
+ *
+ * @return integer:
+ *    See constants beginning 'NCI_SSO_MODE_...' defined above.
+ */
 function nci_SSO_login_mode() {
     return variable_get('nci_sso_login_mode', NCI_SSO_MODE_ONLY_SSO);
 }
 
+/**
+ * Should the system try to create a new user automatically if the user isn't
+ * found?
+ *
+ * @return integer:
+ *    1 - Yes.
+ *    0 - No, do not try to automatically create new user.
+ */
 function nci_SSO_autocreate() {
     return variable_get('nci_sso_autocreate', TRUE);
 }
 
+/**
+ * Try any possible matches of authnames in the authmap table with values
+ * of headers returned by SiteMinder.
+ *
+ * For OpenID accounts, we seeded the authmap table with the user's 
+ * external OpenID identifier (Google account email is all that's supported 
+ * as of this writing) to support a one-time login using the header value
+ * appropriate for the ID type.
+ *
+ *  @param string $username
+ *      The user name given by SiteMinder from the SM_USER header.
+ *
+ *  @return array:
+ *      The account array found for this user.
+ *      False if OpenID not allowed, no appropriate SM header found, 
+ *       or no account found to match the header value.
+ */
+function _nci_sso_try_openid_matches($username) {
+
+    // Don't do anything unless we're configured to allow OpenID
+    if (!nci_SSO_openid_okay()) {
+        return False;
+    }
+
+    $openid_prefixes = _nci_sso_get_openid_prefixes();
+
+    foreach ($openid_prefixes as $prefix_key => $prefix_hdr) {
+
+        // Did we get a header for this possibility from SiteMinder?
+        $hdr_value = _nci_SSO_get_header_by_name($prefix_hdr);
+
+        // If so, construct a prefixed form and look for a matching authname
+        // e.g., for 'joe@gmail.com', look for 'mail:joe@gmail.com'
+        if ($hdr_value) {
+            $idstring = $prefix_key . NCI_SSO_OPENID_KEYSEP . $hdr_value;
+            $account = user_external_load($idstring);
+            if ($account) {
+                return $account;
+            }
+        }
+    }
+
+    return False;
+}
+
+/**
+ * Does the system allow OpenID logins using SSO via NIH SSO?  This says
+ * nothing about what OpenID providers are supported, only whether the system
+ * allows at least one.
+ *
+ * Note: Default is to assume OpenID login is okay.  It must be explicitly 
+ * turned off by setting the system variable if that is what is desired.
+ *
+ * @return integer:
+ *    1 - Yes, OpenID logins allowed.
+ *    0 - No, not allowed.
+ */
+function nci_SSO_openid_okay() {
+    $val = variable_get('nci_sso_openid_okay', 1);
+    return $val ? 1 : 0;
+}
+
+/**
+ * Possibly useful debug logger.
+ *
+ * @param string $where - Text describing the reason or place in
+ *                        the code where information is logged.
+ * @param mixed $what   - Variable to be logged.  Arrays and object are okay.
+ */
+function _nci_sso_debug($where, $what) {
+    $now = date('c');
+    $entry = "$now $where\n" . print_r($what, true) . "\n";
+    file_put_contents('/tmp/nci_sso.debug', $entry, FILE_APPEND);
+    drupal_chmod('/tmp/nci_sso.debug', 0664);
+}
 
 
 /**
@@ -118,13 +268,13 @@ function nci_SSO_autocreate() {
  * We cannot use module_invoke() for this, because the arguments need to
  * be passed by reference.
  *
- * @param $type
+ * @param string $type
  *   A text string that controls which user hook to invoke.  Valid choices are:
  *   - insert: Invokes hook_user_insert().
- * @param $edit
+ * @param array $edit
  *   An associative array variable containing form values to be passed
  *   as the first parameter of the hook function.
- * @param $account
+ * @param object $account
  *   The user account object to be passed as the second parameter of the hook
  *   function.
  * @param $category
@@ -142,18 +292,33 @@ function nci_sso_module_invoke($type, &$edit, $account, $category = NULL) {
  * Implements hook_init().
  *
  * Traps a page load to see if authentication is required.
+ *
+ * SSO authentication is not required if:
+ *    Auto-login is disabled, or
+ *    The program is running in command line mode (drush), or
+ *    The user is already properly logged in, or
+ *    The user is anonymous.  (Not allowed in some of our systems.)
+ * Otherwise, the user is taken to a login page where he must login
+ * in order to gain access to the system.
  */
 function nci_SSO_init() {
-
     $path = request_path();
     $alias = drupal_get_path_alias($path);
-
+/*
+_nci_sso_debug('TOP OF INIT', array(
+    'alias' => $alias,
+    'SM_USER' =>  empty($_SERVER['HTTP_SM_USER']) ? '' : $_SERVER['HTTP_SM_USER'],
+    'SM_AUTHTYPE' =>  empty($_SERVER['HTTP_SM_AUTHTYPE']) ? '' : $_SERVER['HTTP_SM_AUTHTYPE'],
+    'SM_REALM' => empty($_SERVER['HTTP_SM_REALM']) ? '' : $_SERVER['HTTP_SM_REALM'],
+    'USER_EMAIL' => empty($_SERVER['HTTP_USER_EMAIL']) ? '' : $_SERVER['HTTP_USER_EMAIL'],
+));
+*/
     //If not auto login then exit immediately
-	//or if called from command line (e.g. drush) then exit immediately
+    //or if called from command line (e.g. drush) then exit immediately
     if (
-		nci_SSO_login_mode() != NCI_SSO_MODE_AUTO_LOGIN
-		|| drupal_is_cli()
-	) {
+        nci_SSO_login_mode() != NCI_SSO_MODE_AUTO_LOGIN
+        || drupal_is_cli()
+    ) {
        return;
     }
 
@@ -176,7 +341,7 @@ function nci_SSO_init() {
 }
 
 /**
- * Implements hook_menu().
+ * Implements hook_menu() to add URL aliases related to SSO logins.
  */
 function nci_SSO_menu() {
     $items = array();
@@ -204,7 +369,11 @@ function nci_SSO_menu() {
         'type' => MENU_CALLBACK,
     );
 
-    // UI for switching to this method of authentication.
+    // UI for switching to this method of authentication from another.
+    // Note that the error message is currently "Sorry, you are not authorized
+    //  to visit this page", even though the real problem might be that
+    //  the identified user uid (in the % replacement) is already an SSO user
+    //  and can't be converted to what he already is.
     $items['user/%/edit/convert_to_sso'] = array(
         'title' => 'Convert to NIH SSO',
         'page callback' => 'drupal_get_form',
@@ -222,6 +391,9 @@ function nci_SSO_menu() {
  * a user's account from another authentication mechanism to the
  * mechanism supported by this module.
  *
+ * Note that name field prompts for NIH name.  If OpenID is allowed,
+ * the prompt includes instructions for OpenID identifiers.
+ *
  *  @param  array   $form         Structured array containing the
  *                                elements and properties of the form
  *  @param  array   &$form_state  Modifiable structured array
@@ -236,22 +408,17 @@ function nci_SSO_menu() {
  *                                form, as well as other markup
  */
 function nci_sso_convert_form($form, &$form_state, $uid) {
-    $desc = 'The user\'s NIH SSO Username.  You can find this information ' .
-            'by going to https://ned.nih.gov and searching for the user and ' .
-            'viewing the account\'s details.  On the details page this is ' .
-            'the "NIH Login Username" field.  Try to make the Drupal ' .
-            'username match this value if possible.';
     $atts = array('attributes' => array('class' => 'button'));
-    return array(
+    $form = array(
         'title' => array(
             '#type' => 'item',
             '#markup' => t('<h1>Convert User to NIH SSO Authentication</h1>'),
         ),
-        'authname' => array(
+        'name' => array(
             '#type' => 'textfield',
             '#title' => t('User NIH SSO Username'),
             '#maxlength' => 128,
-            '#description' => t($desc),
+            '#description' => t(_nci_sso_get_idprompt_desc()),
             '#required' => true,
         ),
         'uid' => array(
@@ -266,6 +433,8 @@ function nci_sso_convert_form($form, &$form_state, $uid) {
             '#markup' => l(t('Cancel'), "user/$uid/edit", $atts),
         ),
     );
+
+    return $form;
 }
 
 /**
@@ -276,6 +445,8 @@ function nci_sso_convert_form($form, &$form_state, $uid) {
  * the account, so there's only one authentication handler for that
  * account; and populates the row for SSO authentication.  Redirects
  * back to the edit user page.
+ *
+ * Works unchanged for NIH or OpenID.
  *
  *  @param  array   $form         Structured array containing the
  *                                elements and properties of the form
@@ -296,7 +467,9 @@ function nci_sso_convert_form_submit($form, &$form_state) {
         ->condition('uid', $uid)
         ->execute();
     $account = user_load($uid);
-    $authname = $form_state['values']['authname'];
+
+    // Get the authentication name from one of the possible fields
+    $authname = $form_state['values']['name'];
     $authmaps = array('authname_' . SSO_MODULE_FOR_AUTHMAP => $authname);
     user_set_authmaps($account, $authmaps);
     drupal_goto("user/$uid/edit");
@@ -316,8 +489,9 @@ function nci_sso_convert_form_submit($form, &$form_state) {
  *                                available
  */
 function _nci_sso_switchable($uid) {
-    if (!user_access('administer users'))
+    if (!user_access('administer users')) {
         return false;
+    }
     $authname = _nci_sso_load_authname($uid);
     return empty($authname) ? true : false;
 }
@@ -408,7 +582,7 @@ function nci_SSO_form_alter(&$form, $form_state, $form_id) {
                     '#type' => 'textfield',
                     '#title' => t('User NIH SSO Username'),
                     '#maxlength' => 128,
-                    '#description' => t('The users NIH SSO Username.  You can find this information by going to https://ned.nih.gov and search for the user and viewing their details.  On the details page this is the "NIH Login Username" field.  Try to make the Drupal username match this value if possible.'),
+                    '#description' => t(_nci_sso_get_idprompt_desc()),
                     '#required' => TRUE,
                     '#default_value' => ($sso_username ? $sso_username : ''),
                 );
@@ -491,8 +665,7 @@ function nci_SSO_settings($form, &$form_state) {
  */
 function nci_SSO_menu_login(){
 
-    //call the login function.
-
+   // Call the login function.
    if($error = _nci_SSO_login())
    {
        switch($error){
@@ -543,6 +716,10 @@ function nci_SSO_menu_login(){
  * error processing the login. This is handled in the nci_SSO_init() or  the nci_SSO_menu_login() function.
  */
 function _nci_SSO_login() {
+// DEBUG
+// $headers = apache_request_headers();
+// _nci_sso_debug('APACHE HEADERS', $headers);
+
     //HTTP_SM_AUTHTYPE should be set to "Form" if it is protected. (This is what we have
     //observed for the current Drupal SSO Setup)
     if( _nci_SSO_get_header_by_name('authtype') != 'Form'){
@@ -554,7 +731,6 @@ function _nci_SSO_login() {
     if (isset($username)) {
 
         if ($username) {
-
             $_REQUEST['SSOLogin'] = TRUE;
 
             //Change in v1.1: Check to see if the user has an account first
@@ -579,13 +755,21 @@ function _nci_SSO_login() {
                       watchdog('SSO Login Failed', 'Unable to save user', NULL, WATCHDOG_WARNING);
                       return NCI_SSO_ERROR_UNABLE_TO_SAVE_USER;
                     }
-                    user_set_authmaps($account, array("authenticate_nci_SSO_authentication" => $username));
                 } else {
-                    //Unknown user account and not autocreating
-                    return NCI_SSO_ERROR_UNKNOWN_USER;
+                    // Try matching possible OpenID seeds in the authmap table.
+                    $account = _nci_sso_try_openid_matches($username);
+                }
+
+                // If we got an account by autologin or OpenID, save the
+                //  authorized username for future use.
+                if ($account) {
+                    user_set_authmaps($account, array("authname_nci_SSO_authentication" => $username));
                 }
             }
-            else if($account->status == 0) {
+            if (!$account)
+                // Unknown user account and not autocreating
+                return NCI_SSO_ERROR_UNKNOWN_USER;
+            elseif ($account->status == 0) {
                 // user is blocked and can't be logged in
                 return NCI_SSO_ERROR_USER_BLOCKED;
             }
@@ -610,7 +794,7 @@ function _nci_SSO_login() {
 }
 
 function _nci_SSO_get_SM_Header_Name($variable) {
-	switch($variable) {
+    switch($variable) {
         case 'email': 
             return variable_get('nci_SSO_header_email', 'USER_EMAIL');
         case 'authtype': 
@@ -636,7 +820,6 @@ function _nci_SSO_get_header_by_name($name) {
     if($header) {
         return _nci_SSO_get_header($header);
     }
-    
     return null;
 }
 
@@ -651,28 +834,33 @@ function _nci_SSO_get_header_by_name($name) {
  */
 function _nci_SSO_get_header($header) {
 
-	// If apache header than the format looks like
-	// 	SM_USER
-	// If $_SERVER then the header looks like
-	//  HTTP_SM_USER
-	
-	if (_nci_SSO_has_apache_headers()) {
+    // If apache header than the format looks like
+    //     SM_USER
+    // If $_SERVER then the header looks like
+    //  HTTP_SM_USER
+    
+    if (_nci_SSO_has_apache_headers()) {
         $headers = apache_request_headers();
         if(isset($headers[$header])) {
             return $headers[$header];
-        } else {
+        }
+        elseif (isset($headers[strtolower($header)]))
+            return $headers[strtolower($header)];
+        elseif (isset($headers[strtoupper($header)]))
+            return $headers[strtoupper($header)];
+        else {
             watchdog('nci_SSO', 
                 "_nci_SSO_get_header: $header not found in Apache headers.",
                 NULL, WATCHDOG_WARNING);
-			
-			if(function_exists('apache_request_headers')) {
-				$apacheHeaders = print_r(apache_request_headers(), true);
-				watchdog('nci_SSO', 
+            
+            if(function_exists('apache_request_headers')) {
+                $apacheHeaders = print_r(apache_request_headers(), true);
+                watchdog('nci_SSO', 
                 "_nci_SSO_get_SM_Header_Name: apache headers:\n%apacheHeaders",
                 array('%apacheHeaders' => $apacheHeaders), WATCHDOG_WARNING);
-			}
+            }
         }
-	} else {
+    } else {
         $http_header = 'HTTP_' . $header;
         if(isset($_SERVER[$http_header])) {
             return $_SERVER[$http_header];
@@ -680,13 +868,13 @@ function _nci_SSO_get_header($header) {
             watchdog('nci_SSO', 
                 "_nci_SSO_get_header: $http_header not found in server headers.",
                 NULL, WATCHDOG_WARNING);
-			
-			$serverHeaders = print_r($_SERVER, true);
-				watchdog('nci_SSO', 
+            
+            $serverHeaders = print_r($_SERVER, true);
+                watchdog('nci_SSO', 
                 "_nci_SSO_get_SM_Header_Name: _SERVER headers:\n%server",
                 array('%server' => $serverHeaders), WATCHDOG_WARNING);
         }
-	}
+    }
     
     return null;
 }
@@ -694,11 +882,11 @@ function _nci_SSO_get_header($header) {
 function _nci_SSO_has_apache_headers() {
     static $isApache = NULL;
 
-	if (!isset($isApache)) {
-		 $isApache = function_exists('apache_request_headers');
-	}
-		
-	return $isApache;
+    if (!isset($isApache)) {
+         $isApache = function_exists('apache_request_headers');
+    }
+        
+    return $isApache;
 
 }
 
@@ -731,7 +919,7 @@ function nci_SSO_user_presave(&$edit, $account, $category){
         {
             $edit['mail'] = $email;
             //load all other modules implementations of nci_SSO_user_presave.
-            nci_SSO_module_invoke('insert_presave', $edit, $account, $category);
+            nci_sso_module_invoke('insert_presave', $edit, $account, $category);
         }
         else {
             watchdog('Failed to set user email on sso user presave', 
