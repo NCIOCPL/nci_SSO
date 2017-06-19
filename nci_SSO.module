@@ -1,7 +1,6 @@
 <?php
 
 /**
- * $Id$
  * @file
  * Provides protection using NIH SSO Login.
  */
@@ -49,9 +48,9 @@
  * -----------
  *
  * 1.3 - Adding support for SiteMinder module + Apache 2.4.  Apache changed the way it handles HTTP Headers
- * and the population of environmental variable (e.g. $_SERVER) 
- *
- *
+ * and the population of environmental variable (e.g. $_SERVER)
+ * 1.4 - Support OpenID logins
+ * 1.5 - Enhance logging for OpenID logins (OCEEBMS-406)
  */
 
 /**
@@ -188,8 +187,8 @@ function nci_SSO_autocreate() {
  * Try any possible matches of authnames in the authmap table with values
  * of headers returned by SiteMinder.
  *
- * For OpenID accounts, we seeded the authmap table with the user's 
- * external OpenID identifier (Google account email is all that's supported 
+ * For OpenID accounts, we seeded the authmap table with the user's
+ * external OpenID identifier (Google account email is all that's supported
  * as of this writing) to support a one-time login using the header value
  * appropriate for the ID type.
  *
@@ -198,7 +197,7 @@ function nci_SSO_autocreate() {
  *
  *  @return array:
  *      The account array found for this user.
- *      False if OpenID not allowed, no appropriate SM header found, 
+ *      False if OpenID not allowed, no appropriate SM header found,
  *       or no account found to match the header value.
  */
 function _nci_sso_try_openid_matches($username) {
@@ -212,6 +211,10 @@ function _nci_sso_try_openid_matches($username) {
 
     foreach ($openid_prefixes as $prefix_key => $prefix_hdr) {
 
+        watchdog('nci_SSO', 'Looking for OpenID match for ' .
+            "'$username'" . ' using ' . "'$prefix_hdr'" . ' header.',
+            NULL, WATCHDOG_DEBUG);
+
         // Did we get a header for this possibility from SiteMinder?
         $hdr_value = _nci_SSO_get_header_by_name($prefix_hdr);
 
@@ -219,11 +222,18 @@ function _nci_sso_try_openid_matches($username) {
         // e.g., for 'joe@gmail.com', look for 'mail:joe@gmail.com'
         if ($hdr_value) {
             $idstring = $prefix_key . NCI_SSO_OPENID_KEYSEP . $hdr_value;
+            watchdog('nci_SSO', 'Attempting to load user using id ' .
+                "'$idstring'" . '.', NULL, WATCHDOG_DEBUG);
             $account = user_external_load($idstring);
             if ($account) {
+                watchdog('nci_SSO',
+                    "User $username loaded successfully from id.");
                 return $account;
             }
         }
+        else
+            watchdog('nci_SSO', "'$prefix_hdr'" . ' header not found.',
+                NULL, WATCHDOG_WARNING);
     }
 
     return False;
@@ -234,7 +244,7 @@ function _nci_sso_try_openid_matches($username) {
  * nothing about what OpenID providers are supported, only whether the system
  * allows at least one.
  *
- * Note: Default is to assume OpenID login is okay.  It must be explicitly 
+ * Note: Default is to assume OpenID login is okay.  It must be explicitly
  * turned off by setting the system variable if that is what is desired.
  *
  * @return integer:
@@ -256,8 +266,8 @@ function nci_SSO_openid_okay() {
 function _nci_sso_debug($where, $what) {
     $now = date('c');
     $entry = "$now $where\n" . print_r($what, true) . "\n";
-    file_put_contents('/tmp/nci_sso.debug', $entry, FILE_APPEND);
-    drupal_chmod('/tmp/nci_sso.debug', 0664);
+    @file_put_contents('/tmp/nci_sso.debug', $entry, FILE_APPEND);
+    @drupal_chmod('/tmp/nci_sso.debug', 0664);
 }
 
 
@@ -723,7 +733,8 @@ function _nci_SSO_login() {
     //HTTP_SM_AUTHTYPE should be set to "Form" if it is protected. (This is what we have
     //observed for the current Drupal SSO Setup)
     if( _nci_SSO_get_header_by_name('authtype') != 'Form'){
-        watchdog('SSO Login Failed', 'Page is not protected by SSO.', NULL, WATCHDOG_WARNING);
+        watchdog('nci_SSO', 'SSO login failed: page is not protected by SSO.',
+            NULL, WATCHDOG_WARNING);
         return NCI_SSO_ERROR_MISSING_AUTH_HEADER;
     }
     //Step 1. Get the SM_USER HTTP header
@@ -731,6 +742,8 @@ function _nci_SSO_login() {
     if (isset($username)) {
 
         if ($username) {
+            watchdog('nci_SSO', "login attempt for user '$username'", NULL,
+                WATCHDOG_DEBUG);
             $_REQUEST['SSOLogin'] = TRUE;
 
             //Change in v1.1: Check to see if the user has an account first
@@ -749,11 +762,15 @@ function _nci_SSO_login() {
                       'status' => 1,
                       'access' => REQUEST_TIME
                     );
+                    watchdog('nci_SSO', "auto creating user $username", NULL,
+                        WATCHDOG_DEBUG);
                     $account = user_save(drupal_anonymous_user(), $userinfo);
                     // Terminate if an error occurred during user_save().
                     if (!$account) {
-                      watchdog('SSO Login Failed', 'Unable to save user', NULL, WATCHDOG_WARNING);
-                      return NCI_SSO_ERROR_UNABLE_TO_SAVE_USER;
+                        watchdog('nci_SSO',
+                            'SSO login failed: unable to save user', NULL,
+                            WATCHDOG_WARNING);
+                        return NCI_SSO_ERROR_UNABLE_TO_SAVE_USER;
                     }
                 } else {
                     // Try matching possible OpenID seeds in the authmap table.
@@ -781,12 +798,16 @@ function _nci_SSO_login() {
             return 0;
 
         } else {
-            watchdog('SSO Login Failed', 'Username was empty in headers', NULL, WATCHDOG_WARNING);
+            watchdog('nci_SSO',
+                'SSO login failed: username was empty in headers', NULL,
+                WATCHDOG_WARNING);
 
             return NCI_SSO_ERROR_EMPTY_USER_HEADER;
         }
     } else {
-            watchdog('SSO Login Failed', 'Username was missing from headers', NULL, WATCHDOG_WARNING);
+        watchdog('nci_SSO',
+            'SSO login failed: username was missing from headers', NULL,
+            WATCHDOG_WARNING);
 
             return NCI_SSO_ERROR_MISSING_USER_HEADER;
     }
@@ -795,14 +816,14 @@ function _nci_SSO_login() {
 
 function _nci_SSO_get_SM_Header_Name($variable) {
     switch($variable) {
-        case 'email': 
+        case 'email':
             return variable_get('nci_SSO_header_email', 'USER_EMAIL');
-        case 'authtype': 
+        case 'authtype':
             return variable_get('nci_SSO_header_authtype', 'SM_AUTHTYPE');
-        case 'user': 
+        case 'user':
             return variable_get('nci_SSO_header_user', 'SM_USER');
         default:
-            watchdog('nci_SSO', 
+            watchdog('nci_SSO',
                 "_nci_SSO_get_SM_Header_Name: unknown variable alias $variable requested.",
                 NULL, WATCHDOG_WARNING);
             return null;
@@ -810,12 +831,12 @@ function _nci_SSO_get_SM_Header_Name($variable) {
 }
 
 function _nci_SSO_get_header_by_name($name) {
-    
+
     // retrieve the header name
-    
+
     // if the header name exists,
     // then get the header's value
-    
+
     $header = _nci_SSO_get_SM_Header_Name($name);
     if($header) {
         return _nci_SSO_get_header($header);
@@ -828,7 +849,7 @@ function _nci_SSO_get_header_by_name($name) {
  * into the environmental $_SERVER variable anymore.  There is an apache_request_headers() function that can
  * can access the header, but is only available to certain web servers.  In order to make sure this stays
  * compatible with IIS, we are creating this wrapper function as a generic way to access the headers.
- * 
+ *
  * $header: The header to get the value of.  This should not contain the preceeding HTTP_ string.
  * @param type $header
  */
@@ -838,7 +859,7 @@ function _nci_SSO_get_header($header) {
     //     SM_USER
     // If $_SERVER then the header looks like
     //  HTTP_SM_USER
-    
+
     if (_nci_SSO_has_apache_headers()) {
         $headers = apache_request_headers();
         if(isset($headers[$header])) {
@@ -849,13 +870,13 @@ function _nci_SSO_get_header($header) {
         elseif (isset($headers[strtoupper($header)]))
             return $headers[strtoupper($header)];
         else {
-            watchdog('nci_SSO', 
+            watchdog('nci_SSO',
                 "_nci_SSO_get_header: $header not found in Apache headers.",
                 NULL, WATCHDOG_WARNING);
-            
+
             if(function_exists('apache_request_headers')) {
                 $apacheHeaders = print_r(apache_request_headers(), true);
-                watchdog('nci_SSO', 
+                watchdog('nci_SSO',
                 "_nci_SSO_get_SM_Header_Name: apache headers:\n%apacheHeaders",
                 array('%apacheHeaders' => $apacheHeaders), WATCHDOG_WARNING);
             }
@@ -865,17 +886,17 @@ function _nci_SSO_get_header($header) {
         if(isset($_SERVER[$http_header])) {
             return $_SERVER[$http_header];
         } else {
-            watchdog('nci_SSO', 
+            watchdog('nci_SSO',
                 "_nci_SSO_get_header: $http_header not found in server headers.",
                 NULL, WATCHDOG_WARNING);
-            
+
             $serverHeaders = print_r($_SERVER, true);
-                watchdog('nci_SSO', 
+                watchdog('nci_SSO',
                 "_nci_SSO_get_SM_Header_Name: _SERVER headers:\n%server",
                 array('%server' => $serverHeaders), WATCHDOG_WARNING);
         }
     }
-    
+
     return null;
 }
 
@@ -885,7 +906,7 @@ function _nci_SSO_has_apache_headers() {
     if (!isset($isApache)) {
          $isApache = function_exists('apache_request_headers');
     }
-        
+
     return $isApache;
 
 }
@@ -905,26 +926,26 @@ function _nci_SSO_has_apache_headers() {
  * @param type $account
  * @param type $category
  */
-function nci_SSO_user_presave(&$edit, $account, $category){
+function nci_SSO_user_presave(&$edit, $account, $category) {
 
-    if( isset($_REQUEST['SSOLogin']) ) //if the session is set...
+    if (isset($_REQUEST['SSOLogin'])) // if the session is set...
     {
         $email = _nci_SSO_get_header_by_name('email');
-        if(!isset($email)) //if the USER_EMAIL header is set...
+        if (!isset($email)) // if the USER_EMAIL header is set...
         {
-            watchdog('Failed to set user email on sso user presave', 
+            watchdog('nci_SSO',
+                'Failed to set user email on sso user presave: ' .
                 'HTTP_USER_EMAIL Header was missing.', NULL, WATCHDOG_WARNING);
         }
-        else if($email) //If the email is valid (We could expend this to check for empty spaces..
+        elseif ($email) //If the email is valid (We could expend this to check for empty spaces..
         {
             $edit['mail'] = $email;
             //load all other modules implementations of nci_SSO_user_presave.
             nci_sso_module_invoke('insert_presave', $edit, $account, $category);
         }
         else {
-            watchdog('Failed to set user email on sso user presave', 
-                'Email was missing.', NULL, WATCHDOG_WARNING);
+            watchdog('nci_SSO', 'Failed to set user email on sso user ' .
+                'presave: email was missing.', NULL, WATCHDOG_WARNING);
         }
-       
     }
 }
